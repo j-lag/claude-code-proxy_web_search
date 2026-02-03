@@ -1,10 +1,12 @@
 import json
-from typing import Dict, Any, List
-from venv import logger
-from src.core.constants import Constants
-from src.models.claude import ClaudeMessagesRequest, ClaudeMessage
-from src.core.config import config
 import logging
+from typing import Any, Dict, List, Optional
+
+from venv import logger
+
+from src.core.config import config
+from src.core.constants import Constants
+from src.models.claude import ClaudeMessage, ClaudeMessagesRequest, ClaudeTool
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +106,7 @@ def convert_claude_to_openai(
                         Constants.TOOL_FUNCTION: {
                             "name": tool.name,
                             "description": tool.description or "",
-                            "parameters": tool.input_schema,
+                            "parameters": tool.input_schema or {},
                         },
                     }
                 )
@@ -127,6 +129,168 @@ def convert_claude_to_openai(
             openai_request["tool_choice"] = "auto"
 
     return openai_request
+
+
+def has_web_search_tool(tools: Optional[List[ClaudeTool]]) -> bool:
+    """Detect if the Claude request enables the web_search tool."""
+    if not tools:
+        return False
+
+    for tool in tools:
+        tool_name = (tool.name or "").strip().lower()
+        tool_type = (tool.type or "").strip().lower()
+        if tool_name == "web_search" and (
+            not tool_type or tool_type.startswith("web_search_")
+        ):
+            return True
+    return False
+
+
+def convert_claude_to_responses(
+    claude_request: ClaudeMessagesRequest,
+    model_manager,
+    include_web_search: bool,
+) -> Dict[str, Any]:
+    """Convert a Claude request into an OpenAI Responses API payload."""
+
+    openai_request = convert_claude_to_openai(claude_request, model_manager)
+    openai_messages = openai_request.get("messages", [])
+
+    responses_input = _convert_messages_to_responses_input(openai_messages)
+    if not responses_input:
+        responses_input = [
+            _build_responses_message("user", [{"type": "input_text", "text": ""}])
+        ]
+
+    responses_tools: List[Dict[str, Any]] = []
+    if include_web_search:
+        responses_tools.append({"type": "web_search", "external_web_access": True})
+
+    function_tools = _convert_function_tools(claude_request.tools, include_web_search)
+    if function_tools:
+        responses_tools.extend(function_tools)
+
+    responses_request: Dict[str, Any] = {
+        "model": openai_request["model"],
+        "input": responses_input,
+        "tool_choice": "auto",
+        "temperature": claude_request.temperature,
+    }
+
+    if responses_tools:
+        responses_request["tools"] = responses_tools
+
+    if claude_request.stop_sequences:
+        responses_request["stop"] = claude_request.stop_sequences
+    if claude_request.top_p is not None:
+        responses_request["top_p"] = claude_request.top_p
+
+    return responses_request
+
+
+def _convert_function_tools(
+    tools: Optional[List[ClaudeTool]], include_web_search: bool
+) -> List[Dict[str, Any]]:
+    """Convert Claude tools (excluding built-in web search) to OpenAI format."""
+    if not tools:
+        return []
+
+    converted_tools = []
+    for tool in tools:
+        tool_name = (tool.name or "").strip().lower()
+        if tool_name == "web_search" and include_web_search:
+            # Skip the server-side web search entry; we provide the Responses tool instead
+            continue
+        # If include_web_search is False, fall through and treat it like a user-defined tool
+
+        if tool.name and tool.input_schema is not None:
+            converted_tools.append(
+                {
+                    "type": Constants.TOOL_FUNCTION,
+                    Constants.TOOL_FUNCTION: {
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "parameters": tool.input_schema or {},
+                    },
+                }
+            )
+    return converted_tools
+
+
+def _convert_messages_to_responses_input(
+    openai_messages: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Transform chat-completion-style messages into Responses input format."""
+    responses_input: List[Dict[str, Any]] = []
+    for message in openai_messages:
+        role = message.get("role")
+        responses_role = _map_role_to_responses(role)
+        if not responses_role:
+            continue
+
+        content_items = _convert_message_content_to_responses(message)
+        responses_input.append(_build_responses_message(responses_role, content_items))
+    return responses_input
+
+
+def _map_role_to_responses(role: Optional[str]) -> Optional[str]:
+    if not role:
+        return None
+    if role == Constants.ROLE_SYSTEM:
+        return "developer"
+    if role == Constants.ROLE_TOOL:
+        return "developer"
+    if role in (Constants.ROLE_USER, Constants.ROLE_ASSISTANT):
+        return role
+    return None
+
+
+def _convert_message_content_to_responses(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Convert a single OpenAI chat message into Responses content blocks."""
+    content_items: List[Dict[str, Any]] = []
+    message_content = message.get("content")
+
+    if isinstance(message_content, list):
+        for block in message_content:
+            block_type = block.get("type")
+            if block_type == "text":
+                text = block.get("text", "")
+                if text:
+                    content_items.append({"type": "input_text", "text": text})
+            elif block_type == "image_url":
+                content_items.append(
+                    {"type": "input_image", "image_url": block.get("image_url", {})}
+                )
+            else:
+                content_items.append(
+                    {
+                        "type": "input_text",
+                        "text": json.dumps(block, ensure_ascii=False),
+                    }
+                )
+    elif isinstance(message_content, str):
+        content_items.append({"type": "input_text", "text": message_content})
+    elif message_content is not None:
+        content_items.append(
+            {"type": "input_text", "text": json.dumps(message_content, ensure_ascii=False)}
+        )
+
+    tool_calls = message.get("tool_calls") or []
+    for tool_call in tool_calls:
+        function_data = tool_call.get(Constants.TOOL_FUNCTION, {})
+        name = function_data.get("name", "tool_call")
+        arguments = function_data.get("arguments", "")
+        summary = f"[tool_call:{name}] {arguments}"
+        content_items.append({"type": "input_text", "text": summary})
+
+    if not content_items:
+        content_items.append({"type": "input_text", "text": ""})
+
+    return content_items
+
+
+def _build_responses_message(role: str, content: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {"type": "message", "role": role, "content": content}
 
 
 def convert_claude_user_message(msg: ClaudeMessage) -> Dict[str, Any]:

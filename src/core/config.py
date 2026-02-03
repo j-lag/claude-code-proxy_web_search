@@ -26,9 +26,10 @@ class Config:
         self.max_retries = int(os.environ.get("MAX_RETRIES", "2"))
         
         # Model settings - BIG and SMALL models
-        self.big_model = os.environ.get("BIG_MODEL", "gpt-4o")
+        default_model = "gpt-5.1-codex"
+        self.big_model = os.environ.get("BIG_MODEL", default_model)
         self.middle_model = os.environ.get("MIDDLE_MODEL", self.big_model)
-        self.small_model = os.environ.get("SMALL_MODEL", "gpt-4o-mini")
+        self.small_model = os.environ.get("SMALL_MODEL", default_model)
         
     def validate_api_key(self):
         """Basic API key validation"""

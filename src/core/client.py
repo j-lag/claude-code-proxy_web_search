@@ -100,6 +100,56 @@ class OpenAIClient:
             if request_id and request_id in self.active_requests:
                 del self.active_requests[request_id]
     
+    async def create_response(self, request: Dict[str, Any], request_id: Optional[str] = None) -> Dict[str, Any]:
+        """Send a Responses API request to OpenAI-compatible servers."""
+        if request_id:
+            cancel_event = asyncio.Event()
+            self.active_requests[request_id] = cancel_event
+
+        try:
+            response_task = asyncio.create_task(
+                self.client.responses.create(**request)
+            )
+
+            if request_id:
+                cancel_task = asyncio.create_task(cancel_event.wait())
+                done, pending = await asyncio.wait(
+                    [response_task, cancel_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+                if cancel_task in done:
+                    response_task.cancel()
+                    raise HTTPException(status_code=499, detail="Request cancelled by client")
+
+                response = await response_task
+            else:
+                response = await response_task
+
+            return response.model_dump()
+
+        except AuthenticationError as e:
+            raise HTTPException(status_code=401, detail=self.classify_openai_error(str(e)))
+        except RateLimitError as e:
+            raise HTTPException(status_code=429, detail=self.classify_openai_error(str(e)))
+        except BadRequestError as e:
+            raise HTTPException(status_code=400, detail=self.classify_openai_error(str(e)))
+        except APIError as e:
+            status_code = getattr(e, 'status_code', 500)
+            raise HTTPException(status_code=status_code, detail=self.classify_openai_error(str(e)))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        finally:
+            if request_id and request_id in self.active_requests:
+                del self.active_requests[request_id]
+
     async def create_chat_completion_stream(self, request: Dict[str, Any], request_id: Optional[str] = None) -> AsyncGenerator[str, None]:
         """Send streaming chat completion to OpenAI API with cancellation support."""
         

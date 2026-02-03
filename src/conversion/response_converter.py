@@ -1,6 +1,9 @@
 import json
 import uuid
+from typing import Any, Dict, Tuple
+
 from fastapi import HTTPException, Request
+
 from src.core.constants import Constants
 from src.models.claude import ClaudeMessagesRequest
 
@@ -76,6 +79,90 @@ def convert_openai_to_claude_response(
     }
 
     return claude_response
+
+
+def convert_responses_to_claude_response(
+    responses_payload: dict, original_request: ClaudeMessagesRequest
+) -> Tuple[dict, str, Dict[str, int]]:
+    """Convert OpenAI Responses output to a Claude response plus extracted text."""
+    response_id = responses_payload.get("id", f"resp_{uuid.uuid4()}")
+    text_output = _extract_responses_text(responses_payload)
+    usage = _normalize_usage(responses_payload.get("usage", {}))
+
+    claude_response = {
+        "id": response_id,
+        "type": "message",
+        "role": Constants.ROLE_ASSISTANT,
+        "model": original_request.model,
+        "content": [
+            {"type": Constants.CONTENT_TEXT, "text": text_output}
+        ],
+        "stop_reason": Constants.STOP_END_TURN,
+        "stop_sequence": None,
+        "usage": usage,
+    }
+
+    return claude_response, text_output, usage
+
+
+def _extract_responses_text(responses_payload: dict) -> str:
+    """Extract assistant text from a Responses API payload."""
+    output_text = responses_payload.get("output_text")
+    if isinstance(output_text, list) and output_text:
+        joined = "\n".join(filter(None, output_text)).strip()
+        if joined:
+            return joined
+
+    collected = []
+    for item in responses_payload.get("output", []):
+        if item.get("type") == "message":
+            for block in item.get("content", []):
+                block_type = block.get("type")
+                if block_type in ("output_text", "text", Constants.CONTENT_TEXT):
+                    collected.append(block.get("text", ""))
+    return "\n".join(filter(None, collected)).strip()
+
+
+def _normalize_usage(usage_block: Dict[str, Any]) -> Dict[str, int]:
+    """Map Responses usage payload to Claude's usage structure."""
+    input_tokens = (
+        usage_block.get("input_tokens")
+        or usage_block.get("prompt_tokens")
+        or 0
+    )
+    output_tokens = (
+        usage_block.get("output_tokens")
+        or usage_block.get("completion_tokens")
+        or 0
+    )
+    cache_tokens = usage_block.get("cache_read_input_tokens") or 0
+    normalized = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+    if cache_tokens:
+        normalized["cache_read_input_tokens"] = cache_tokens
+    return normalized
+
+
+async def stream_responses_text_as_claude_events(
+    text: str,
+    original_request: ClaudeMessagesRequest,
+    usage: Dict[str, int],
+):
+    """Yield Claude SSE events for a fully-buffered Responses text output."""
+    message_id = f"msg_{uuid.uuid4().hex[:24]}"
+    stop_reason = Constants.STOP_END_TURN
+
+    yield f"event: {Constants.EVENT_MESSAGE_START}\ndata: {json.dumps({'type': Constants.EVENT_MESSAGE_START, 'message': {'id': message_id, 'type': 'message', 'role': Constants.ROLE_ASSISTANT, 'model': original_request.model, 'content': [], 'stop_reason': None, 'stop_sequence': None, 'usage': usage}}, ensure_ascii=False)}\n\n"
+    yield f"event: {Constants.EVENT_CONTENT_BLOCK_START}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_START, 'index': 0, 'content_block': {'type': Constants.CONTENT_TEXT, 'text': ''}}, ensure_ascii=False)}\n\n"
+
+    if text:
+        yield f"event: {Constants.EVENT_CONTENT_BLOCK_DELTA}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_DELTA, 'index': 0, 'delta': {'type': Constants.DELTA_TEXT, 'text': text}}, ensure_ascii=False)}\n\n"
+
+    yield f"event: {Constants.EVENT_CONTENT_BLOCK_STOP}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_STOP, 'index': 0}, ensure_ascii=False)}\n\n"
+    yield f"event: {Constants.EVENT_MESSAGE_DELTA}\ndata: {json.dumps({'type': Constants.EVENT_MESSAGE_DELTA, 'delta': {'stop_reason': stop_reason, 'stop_sequence': None}, 'usage': usage}, ensure_ascii=False)}\n\n"
+    yield f"event: {Constants.EVENT_MESSAGE_STOP}\ndata: {json.dumps({'type': Constants.EVENT_MESSAGE_STOP}, ensure_ascii=False)}\n\n"
 
 
 async def convert_openai_streaming_to_claude(

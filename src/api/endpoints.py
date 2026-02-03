@@ -8,10 +8,16 @@ from src.core.config import config
 from src.core.logging import logger
 from src.core.client import OpenAIClient
 from src.models.claude import ClaudeMessagesRequest, ClaudeTokenCountRequest
-from src.conversion.request_converter import convert_claude_to_openai
+from src.conversion.request_converter import (
+    convert_claude_to_openai,
+    convert_claude_to_responses,
+    has_web_search_tool,
+)
 from src.conversion.response_converter import (
     convert_openai_to_claude_response,
     convert_openai_streaming_to_claude_with_cancellation,
+    convert_responses_to_claude_response,
+    stream_responses_text_as_claude_events,
 )
 from src.core.model_manager import model_manager
 
@@ -60,14 +66,52 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
         # Generate unique request ID for cancellation tracking
         request_id = str(uuid.uuid4())
 
+        web_search_enabled = has_web_search_tool(request.tools)
+
         # Convert Claude request to OpenAI format
-        openai_request = convert_claude_to_openai(request, model_manager)
+        openai_request = (
+            convert_claude_to_openai(request, model_manager)
+            if not web_search_enabled
+            else None
+        )
 
         # Check if client disconnected before processing
         if await http_request.is_disconnected():
             raise HTTPException(status_code=499, detail="Client disconnected")
 
-        if request.stream:
+        if web_search_enabled:
+            responses_request = convert_claude_to_responses(
+                request, model_manager, include_web_search=web_search_enabled
+            )
+            logger.debug(
+                "Web search enabled for request_id=%s; forwarding via Responses API",
+                request_id,
+            )
+            openai_response = await openai_client.create_response(
+                responses_request, request_id
+            )
+            claude_response, response_text, usage = convert_responses_to_claude_response(
+                openai_response, request
+            )
+
+            if request.stream:
+                stream_generator = stream_responses_text_as_claude_events(
+                    response_text, request, usage
+                )
+                return StreamingResponse(
+                    stream_generator,
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Headers": "*",
+                    },
+                )
+
+            return claude_response
+
+        if request.stream and openai_request is not None:
             # Streaming response - wrap in error handling
             try:
                 openai_stream = openai_client.create_chat_completion_stream(
@@ -181,7 +225,7 @@ async def test_connection():
             {
                 "model": config.small_model,
                 "messages": [{"role": "user", "content": "Hello"}],
-                "max_tokens": 5,
+                #"max_tokens": 5,
             }
         )
 

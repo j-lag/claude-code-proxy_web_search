@@ -76,9 +76,9 @@ The application automatically loads environment variables from a `.env` file in 
 
 **Model Configuration:**
 
-- `BIG_MODEL` - Model for Claude opus requests (default: `gpt-4o`)
-- `MIDDLE_MODEL` - Model for Claude opus requests (default: `gpt-4o`)
-- `SMALL_MODEL` - Model for Claude haiku requests (default: `gpt-4o-mini`)
+- `BIG_MODEL` - Model for Claude opus requests (default: `gpt-5.1-codex`)
+- `MIDDLE_MODEL` - Model for Claude opus requests (default: `BIG_MODEL`)
+- `SMALL_MODEL` - Model for Claude haiku requests (default: `gpt-5.1-codex`)
 
 **API Configuration:**
 
@@ -160,9 +160,9 @@ The proxy maps Claude model requests to your configured models:
 
 | Claude Request                 | Mapped To     | Environment Variable   |
 | ------------------------------ | ------------- | ---------------------- |
-| Models with "haiku"            | `SMALL_MODEL` | Default: `gpt-4o-mini` |
-| Models with "sonnet"           | `MIDDLE_MODEL`| Default: `BIG_MODEL`   |
-| Models with "opus"             | `BIG_MODEL`   | Default: `gpt-4o`      |
+| Models with "haiku"            | `SMALL_MODEL` | Default: `gpt-5.1-codex` |
+| Models with "sonnet"           | `MIDDLE_MODEL`| Default: `BIG_MODEL`     |
+| Models with "opus"             | `BIG_MODEL`   | Default: `gpt-5.1-codex` |
 
 ### Provider Examples
 
@@ -218,6 +218,40 @@ response = httpx.post(
     }
 )
 ```
+
+## Web Search Tool Support
+
+When a Claude Code session enables the `web_search` tool, the proxy now forwards the request to the OpenAI **Responses API** and exposes the `web_search` tool that Azure Foundry provides. Set your upstream endpoint before starting the proxy:
+
+```bash
+export OPENAI_BASE_URL="https://XXXXXXXXXXXXXXXXXXXX/v1"
+export BIG_MODEL="gpt-5.1-codex"   # default, override if needed
+export SMALL_MODEL="gpt-5.1-codex"
+python start_proxy.py
+```
+
+### Quick cURL Check
+
+Use the following request to confirm that the proxy detects Anthropic's built-in web search tool (note the `type` prefix) and calls `/responses` upstream. Run with `LOG_LEVEL=DEBUG` to see the `Web search enabled...` log line.
+
+```bash
+curl -s http://localhost:8082/v1/messages \
+  -H "content-type: application/json" \
+  -H "x-api-key: ${ANTHROPIC_API_KEY:-dummy}" \
+  -d '{
+        "model": "claude-3-5-sonnet-20241022",
+        "max_tokens": 800,
+        "stream": false,
+        "messages": [
+          {"role": "user", "content": "Use web_search to report the latest bitcoin price."}
+        ],
+        "tools": [
+          {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+        ]
+      }'
+```
+
+The proxy injects the OpenAI `web_search` tool (`external_web_access=true`) and forwards the conversation via `POST /responses`. Responses that request streaming are delivered as SSE but emit the final chunk once the search completes (no incremental tokens yet).
 
 ## Integration with Claude Code
 
