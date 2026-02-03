@@ -83,7 +83,7 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
             responses_request = convert_claude_to_responses(
                 request, model_manager, include_web_search=web_search_enabled
             )
-            logger.debug(
+            logger.info(
                 "Web search enabled for request_id=%s; forwarding via Responses API",
                 request_id,
             )

@@ -1,10 +1,18 @@
 import asyncio
 import json
+from typing import Any, AsyncGenerator, Dict, Optional
+
 from fastapi import HTTPException
-from typing import Optional, AsyncGenerator, Dict, Any
-from openai import AsyncOpenAI, AsyncAzureOpenAI
+from openai import AsyncAzureOpenAI, AsyncOpenAI
+from openai._exceptions import (
+    APIError,
+    AuthenticationError,
+    BadRequestError,
+    RateLimitError,
+)
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
-from openai._exceptions import APIError, RateLimitError, AuthenticationError, BadRequestError
+
+from src.core.logging import logger
 
 class OpenAIClient:
     """Async OpenAI client with cancellation support."""
@@ -49,6 +57,13 @@ class OpenAIClient:
             cancel_event = asyncio.Event()
             self.active_requests[request_id] = cancel_event
         
+        logger.info(
+            "Dispatching ChatCompletion request%s to %s/chat/completions (stream=%s)",
+            f" id={request_id}" if request_id else "",
+            self.base_url,
+            request.get("stream", False),
+        )
+    
         try:
             # Create task that can be cancelled
             completion_task = asyncio.create_task(
@@ -105,6 +120,19 @@ class OpenAIClient:
         if request_id:
             cancel_event = asyncio.Event()
             self.active_requests[request_id] = cancel_event
+
+        tool_types = [
+            tool.get("type")
+            for tool in request.get("tools", [])
+            if isinstance(tool, dict)
+        ]
+        uses_web_search = "web_search" in tool_types
+        logger.info(
+            "Dispatching Responses request%s to %s/responses (web_search=%s)",
+            f" id={request_id}" if request_id else "",
+            self.base_url,
+            uses_web_search,
+        )
 
         try:
             response_task = asyncio.create_task(
