@@ -321,3 +321,5 @@ claude-code-proxy/
 ## License
 
 MIT License
+
+This project is a fork of https://github.com/fuergaosi233/claude-code-proxy
