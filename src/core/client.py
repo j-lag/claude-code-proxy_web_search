@@ -1,7 +1,7 @@
 import asyncio
 import json
 from typing import Any, AsyncGenerator, Dict, Optional
-
+import httpx
 from fastapi import HTTPException
 from openai import AsyncAzureOpenAI, AsyncOpenAI
 from openai._exceptions import (
@@ -31,6 +31,12 @@ class OpenAIClient:
         # Merge custom headers with default headers
         all_headers = {**default_headers, **self.custom_headers}
         
+        http_client = httpx.AsyncClient(
+        verify=False,        # ⚠️ uniquement pour test
+        trust_env=True
+        )
+        
+        
         # Detect if using Azure and instantiate the appropriate client
         if api_version:
             self.client = AsyncAzureOpenAI(
@@ -38,14 +44,16 @@ class OpenAIClient:
                 azure_endpoint=base_url,
                 api_version=api_version,
                 timeout=timeout,
-                default_headers=all_headers
+                default_headers=all_headers,
+                http_client=http_client
             )
         else:
             self.client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=base_url,
                 timeout=timeout,
-                default_headers=all_headers
+                default_headers=all_headers,
+                http_client=http_client                
             )
         self.active_requests: Dict[str, asyncio.Event] = {}
     
